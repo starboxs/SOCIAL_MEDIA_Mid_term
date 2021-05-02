@@ -1,0 +1,692 @@
+---
+title: "社群媒體分析-第20組期中專案"
+author: "N094020014梁志豪/N094020018劉釗誠/N094020024謝沛芸/N094020026何明信"
+date: "報告日期-2021/5/4"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    highlight: pygments
+    theme: flatly
+    css: style.css
+---
+## A.動機和分析目的
++ 目的:使用coreNLP與sentimentr分析twitter上日本東京奧運的文字資料
++ 概述:原訂於2020年舉辦的東京夏季奧運，因受全球新冠肺炎疫情影響，延至2021年舉辦。藉此利用推特的文章分析民眾對"日本東京奧運"的相關情緒。
+
+## B.資料集的描述
++ 資料來源:Twitter，4/09~4/16，5000筆，English
+
+## C.資料分析的過程
+
+## C-1 coreNLP 自然語言處理
+
++ 安裝JAVA JRE 1.8+ https://www.java.com/zh_TW/
++ 下載Stanford coreNLP full模組 
+
+
+安裝package
+```{r message=FALSE, warning=FALSE, paged.print=TRUE}
+
+packages = c("dplyr","ggplot2","rtweet" ,"xml2", "httr", "jsonlite", "data.tree", "NLP", "igraph","sentimentr","tidytext","wordcloud2","DiagrammeR","dplyr" , "showtext")
+existing = as.character(installed.packages()[,1])
+for(pkg in packages[!(packages %in% existing)]) install.packages(pkg)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(wordcloud2)
+library(ggplot2)
+library(scales)
+library(rtweet)
+library(dplyr)
+library(xml2)
+library(httr)
+library(jsonlite)
+library(magrittr)
+library(data.tree)
+library(tidytext)
+library(stringr)
+
+library(DiagrammeR)
+library(magrittr)
+library(showtext)
+showtext_auto() 
+font_add("PingFangSC-Regular",regular = "/System/Library/Fonts/PingFang.ttc")
+```
+
+
+
+
+### 資料收集：tweets
+
+(1). Twitter API設定 
+透過rtweet抓取tweets
+```{r}
+app = 'heminghsin'
+consumer_key = 'kjJGO9cTWdoCG9BHgBwfFtcfi'
+consumer_secret = 'zjamiuhUuWZjjbsi01Jlg38uwVyXeQpiuFkUDk6QhiSIC379UO'
+access_token = '1380751997343698949-qYevxQu1xqqP4dYegz4VeZUzSASi44'
+access_secret = 'Lnbft6o7jK2Du8X9087qTFRRhs3UA2coYJSRi4KnrbR9d'
+twitter_token <- create_token(app,consumer_key, consumer_secret,
+                    access_token, access_secret,set_renv = FALSE)
+#Consumer Keys:知道你的身分
+#Authentication Tokens:認證給你的授權
+```
+
+
+(2). 設定關鍵字抓tweets
+
+```{r eval=FALSE}
+# 查詢關鍵字
+key = c("tokyo")
+context = "Olympics"
+q = paste(c(key,context),collapse=" AND ")   
+# 查詢字詞 "#tokyo AND Olympics"
+# 為了避免只下#tokyo 會找到非在Olympics中的tweets，加入Olympics要同時出現的條件
+
+#抓5000筆 不抓轉推
+tweets = search_tweets(q,lang="en",n=5000,include_rts = FALSE,token = twitter_token)
+```
+
+
+(3). tweets內容清理
+```{r eval=FALSE}
+## 用於資料清理
+clean = function(txt) {
+  txt = iconv(txt, "latin1", "ASCII", sub="") #改變字的encoding
+  txt = gsub("(@|#)\\w+", "", txt) #去除@或#後有數字,字母,底線 (標記人名或hashtag)
+  txt = gsub("(http|https)://.*", "", txt) #去除網址(.:任意字元，*:0次以上)
+  txt = gsub("[ \t]{2,}", "", txt) #去除兩個以上空格或tab
+  txt = gsub("\\n"," ",txt) #去除換行
+  txt = gsub("\\s+"," ",txt) #去除一個或多個空格(+:一次以上)
+  txt = gsub("^\\s+|\\s+$","",txt) #去除開頭/結尾有一個或多個空格
+  txt = gsub("&.*;","",txt) #去除html特殊字元編碼
+  txt = gsub("[^a-zA-Z0-9?!. ']","",txt) #除了字母,數字空白?!.的都去掉(表情符號去掉)
+  txt }
+
+
+tweets$text = clean(tweets$text)  #text套用資料清理
+
+df = data.frame()
+  
+df = rbind(df,tweets)  # transfer to data frame
+
+df = df[!duplicated(df[,"status_id"]),]  #去除重複的tweets
+
+```
+
+
+```{r}
+head(df)
+```
+df共有90個欄位，但我們在這裡僅會使用幾個欄位:
+
++ user_id: 用戶id
++ status_id : 推文id
++ created_at : 發文時間
++ text : 推文內容
++ source : 發文來源
+
+
+#### 了解資料的資料筆數以及時間分布
+created_at已經是一個date類型的欄位，因此可以直接用min,max來看最遠或最近的日期<br>
+註:rtweet最多只能抓到距今10天的資料
+
+```{r}
+nrow(df)
+```
+```{r}
+min(df$created_at)
+```
+```{r}
+max(df$created_at)
+```
+
+
+### 串接CoreNLP API
+
+
+(1). API呼叫的設定
+
+server端 :
++ 需先在terminal開啟corenlp server
++ 在corenlp的路徑下開啟terminal輸入 `java -mx4g -cp "*" edu.stanford.nlp.pipeline.StanfordCoreNLPServer -port 9000 -timeout 15000`
+
+```{r eval=FALSE, message=FALSE, warning=FALSE}
+# 產生coreNLP的api url，將本地端的網址轉成符合coreNLP服務的url
+generate_API_url <- function(host, port="9000",
+                    tokenize.whitespace="false", annotators=""){ #斷詞依據不是空格
+    url <- sprintf('http://%s:%s/?properties={"tokenize.whitespace":"%s","annotators":"%s"}', host, port, tokenize.whitespace, annotators)
+    url <- URLencode(url)
+}
+#指定服務的位置
+host = "127.0.0.1"
+
+generate_API_url(host)
+
+```
+
+
+```{r}
+# 呼叫coreNLP api
+call_coreNLP <- function(server_host, text, host="localhost", language="eng",
+                    tokenize.whitespace="true", ssplit.eolonly="true", annotators=c("tokenize","ssplit","pos","lemma","ner","parse","sentiment")){
+  # 假設有兩個core-nlp server、一個負責英文（使用9000 port）、另一個則負責中文（使用9001 port）
+  port <- ifelse(language=="eng", 9000, 9001);
+  # 產生api網址
+  url <- generate_API_url(server_host, port=port,
+                    tokenize.whitespace=tokenize.whitespace, annotators=paste0(annotators, collapse = ','))
+  
+  result <- POST(url, body = text, encode = "json")
+  doc <- httr::content(result, "parsed","application/json",encoding = "UTF-8")
+  return (doc)
+}
+```
+
+
+```{r}
+#文件使用coreNLP服務
+coreNLP <- function(data,host){
+  # 依序將每個文件丟進core-nlp進行處理，每份文件的回傳結果為json格式
+  # 在R中使用objects來儲存處理結果
+  result <- apply(data, 1 , function(x){
+    object <- call_coreNLP(host, x['text'])
+    list(doc=object, data=x)
+  })
+  
+  return(result)
+}
+```
+
+(2). 資料整理function
+
+從回傳的object中整理斷詞出結果，輸出為 tidydata 格式
+```{r}
+coreNLP_tokens_parser <- function(coreNLP_objects){
+  
+  result <- do.call(rbind, lapply(coreNLP_objects, function(obj){
+    original_data <- obj$data
+    doc <- obj$doc
+    # for a sentences
+    sentences <- doc$sentences
+   
+    sen <- sentences[[1]]
+    
+    tokens <- do.call(rbind, lapply(sen$tokens, function(x){
+      result <- data.frame(word=x$word, lemma=x$lemma, pos=x$pos, ner=x$ner)
+      result
+    }))
+    
+    tokens <- original_data %>%
+      t() %>% 
+      data.frame() %>% 
+      select(-text) %>% 
+      slice(rep(1:n(), each = nrow(tokens))) %>% 
+      bind_cols(tokens)
+    
+    tokens
+  }))
+  return(result)
+}
+
+```
+
+
+從回傳的core-nlp object中整理出詞彙依存關係，輸出為 tidydata 格式
+
+```{r}
+coreNLP_dependency_parser <- function(coreNLP_objects){
+  result <- do.call(rbind, lapply(coreNLP_objects, function(obj){
+    original_data <- obj$data
+    doc <- obj$doc
+    # for a sentences
+    sentences <- doc$sentences
+    sen <- sentences[[1]]
+    dependencies <- do.call(rbind, lapply(sen$basicDependencies, function(x){
+      result <- data.frame(dep=x$dep, governor=x$governor, governorGloss=x$governorGloss, dependent=x$dependent, dependentGloss=x$dependentGloss)
+      result
+    }))
+  
+    dependencies <- original_data %>%
+      t() %>% 
+      data.frame() %>% 
+      select(-text) %>% 
+      slice(rep(1:n(), each = nrow(dependencies))) %>% 
+      bind_cols(dependencies)
+    dependencies
+  }))
+  return(result)
+}
+```
+
+
+從回傳的core-nlp object中整理出語句情緒，輸出為 tidydata 格式
+```{r}
+coreNLP_sentiment_parser <- function(coreNLP_objects){
+  result <- do.call(rbind, lapply(coreNLP_objects, function(obj){
+    original_data <- obj$data
+    doc <- obj$doc
+    # for a sentences
+    sentences <- doc$sentences
+    sen <- sentences[[1]]
+    
+    sentiment <- original_data %>%
+      t() %>% 
+      data.frame() %>% 
+      bind_cols(data.frame(sentiment=sen$sentiment, sentimentValue=sen$sentimentValue))
+  
+    sentiment
+  }))
+  return(result)
+}
+```
+
+
+#### 圖形化 Dependency tree
+
+程式參考來源：https://stackoverflow.com/questions/35496560/how-to-convert-corenlp-generated-parse-tree-into-data-tree-r-package
+
+```{r}
+# 圖形化顯示dependency結果
+parse2tree <- function(ptext) {
+  stopifnot(require(NLP) && require(igraph))
+  
+  # this step modifies coreNLP parse tree to mimic openNLP parse tree
+  ptext <- gsub("[\r\n]", "", ptext)
+  ptext <- gsub("ROOT", "TOP", ptext)
+
+
+  ## Replace words with unique versions
+  ms <- gregexpr("[^() ]+", ptext)                                      # just ignoring spaces and brackets?
+  words <- regmatches(ptext, ms)[[1]]                                   # just words
+  regmatches(ptext, ms) <- list(paste0(words, seq.int(length(words))))  # add id to words
+  
+  ## Going to construct an edgelist and pass that to igraph
+  ## allocate here since we know the size (number of nodes - 1) and -1 more to exclude 'TOP'
+  edgelist <- matrix('', nrow=length(words)-2, ncol=2)
+  
+  ## Function to fill in edgelist in place
+  edgemaker <- (function() {
+    i <- 0                                       # row counter
+    g <- function(node) {                        # the recursive function
+      if (inherits(node, "Tree")) {            # only recurse subtrees
+        if ((val <- node$value) != 'TOP1') { # skip 'TOP' node (added '1' above)
+          for (child in node$children) {
+            childval <- if(inherits(child, "Tree")) child$value else child
+            i <<- i+1
+            edgelist[i,1:2] <<- c(val, childval)
+          }
+        }
+        invisible(lapply(node$children, g))
+      }
+    }
+  })()
+  
+  ## Create the edgelist from the parse tree
+  edgemaker(Tree_parse(ptext))
+  tree <- FromDataFrameNetwork(as.data.frame(edgelist))
+  return (tree)
+}
+
+```
+
+
+
+#### 將句子丟入服務
+
+取得coreNLP回傳的物件<br>
+跑這段，會花大概分鐘
+
+```{r eval=FALSE}
+gc() #釋放不使用的記憶體
+
+t0 = Sys.time()
+obj = df[,c(2,5)]  %>% filter(text != "") %>% coreNLP(host) #丟入本地執行
+#丟入coreNLP的物件 必須符合: 是一個data.frame 有一個text欄位
+
+Sys.time() - t0 #執行時間
+#Time difference of 10 mins
+
+save.image("tokyo2020.RData")
+```
+
+```{r eval=FALSE}
+#先將會用到的東西存下來，要用可直接載RData
+#tokens =  coreNLP_tokens_parser(obj)
+#dependencies = coreNLP_dependency_parser(obj)
+#sentiment = coreNLP_sentiment_parser(obj)
+#save.image("coreNLP_all.RData")
+```
+
+### 提取結果
+
+(1). 斷詞、詞彙還原、詞性標註、NER
+
+```{r eval=FALSE}
+tokens =  coreNLP_tokens_parser(obj)
+```
+
+```{r}
+head(tokens,20)
+```
+- coreNLP_tokens_parser欄位:
+  + status_id : 對應原本df裡的status_id，為一則tweets的唯一id
+  + word: 原始斷詞
+  + lemma : 對斷詞做詞形還原
+  + pos : part-of-speech,詞性
+  + ner: 命名實體
+  
+(2). 命名實體標註(NER)
+
+- 從NER查看特定類型的實體，辨識出哪幾種類型
+```{r}
+unique(tokens$ner)
+```
+
+```{r}
+#除去entity為Other，有多少種word有被標註entity
+length(unique(tokens$word[tokens$ner != "O"])) 
+```
+
+(3). 轉小寫
+
+因為大小寫也會影響corenlp對NER的判斷，因此我們一開始給的推文內容是沒有處理大小寫的，但在跑完anotator後，為了正確計算詞頻，創建新欄位lower_word與lower_lemma，存放轉換小寫的word與lemma。轉成小寫的目的是要將不同大小寫的同一字詞（如Evergiven與evergiven）都換成小寫，再來計算詞頻
+
+```{r}
+tokens$lower_word = tolower(tokens$word)
+tokens$lower_lemma = tolower(tokens$lemma)
+```
+
+
+## C-2 Sentimentr 英文情緒分析
+
+### sentimentr
+
+```{r}
+library(sentimentr)
+
+mytext <- c(
+    'do you like it?  But I hate really bad dogs',
+    'I am the best friend.',
+    'Do you really like it?  I\'m not a fan'
+)
+
+mytext <- get_sentences(mytext) #物件，將character向量轉成list,list裡放著character向量(已斷句)
+```
+
+##### 每個文本的情緒分數
+情緒分數為-1~1之間，<0屬於負面，>0屬於正面，0屬於中性
+```{r}
+sentiment_by(mytext) #document level
+```
+
+##### 每個句子的情緒分數
+```{r}
+sentiment(mytext) #sentence level
+```
+- 回傳4個欄位的dataframe:
+  + element_id – 第幾個文本
+  + sentence_id – 該文本中的第幾個句子
+  + word_count – 句子字數
+  + sentiment – 句子的情緒分數
+
+### 使用twitter資料實踐在sentimentr
+
+##### 計算tweet中屬於正面的字
+```{r}
+set.seed(10)
+mytext <- get_sentences(tweets$text) #將text轉成list of characters型態
+x <- sample(tweets$text, 1000, replace = FALSE) #隨機取1000筆，取後不放回
+sentiment_words <- extract_sentiment_terms(x) #抓取其中帶有情緒的字
+sentiment_counts <- attributes(sentiment_words)$counts #計算出現次數
+sentiment_counts[polarity > 0,]   #正面的字
+```
+
+##### 計算tweet中屬於負面的字
+```{r}
+sentiment_counts[polarity < 0,] %>% arrange(desc(n)) %>% top_n(10) #出現次數最多的負面字
+```
+
+##### highlight每個句子，判斷屬於正/負面
+```{r}
+set.seed(12)
+df%>%
+    filter(status_id %in% sample(unique(status_id), 30)) %>% #隨機30筆貼文
+    mutate(review = get_sentences(text)) %$% 
+    sentiment_by(review, status_id) %>%
+    highlight()
+```
+
+## D.視覺化的分析結果與解釋
+### 探索分析 - NER
+
+##### 涉及到的國家(COUNTRY)
+我們可以透過coreNLP中的NER解析出在Twitter上面談論東京奧運話題，所涉及到的國家(COUNTRY)，以初步了解這個議題的主要國家。
+```{r}
+tokens %>%
+  filter(ner == "COUNTRY") %>%  #篩選NER為COUNTRY
+  group_by(lower_word) %>% #根據word分組
+  summarize(count = n()) %>% #計算每組
+  top_n(n = 5, count) %>%
+  ungroup() %>% 
+  mutate(word = reorder(lower_word, count)) %>%
+  ggplot(aes(word, count)) + 
+  geom_col(fill="#8babd3")+
+  ggtitle("Word Frequency (NER is COUNTRY)") +
+  theme(text=element_text(size=14))
+```
+
++ 在「日本」舉辦Olympics夏季運動會。
++ 奧運會延遲原因是受「中國」新冠肺炎疫影響。
+
+
+##### 涉及到的組織(ORGANIZATION)
+我們可以透過coreNLP中的NER解析出在Twitter上面談論東京奧運話題，所涉及到的組織(ORGANIZATION)，以初步了解這個議題的主要公司/單位。
+
+```{r}
+tokens %>%
+  filter(ner == "ORGANIZATION") %>%  #篩選NER為ORGANIZATION
+  group_by(lower_word) %>% #根據word分組
+  summarize(count = n()) %>% #計算每組
+  top_n(n = 10, count) %>%
+  ungroup() %>% 
+  mutate(word = reorder(lower_word, count)) %>%
+  ggplot(aes(word, count)) + 
+  geom_col(fill="#ffc080")+
+  ggtitle("Word Frequency (NER is ORGANIZATION)") +
+  theme(text=element_text(size=14))
+```
+
++ 自由民主黨（英語： Liberal Democratic Party，縮寫LDP)，簡稱自民黨，目前主政的政黨。
++ 路透通訊社（英語：Reuters），簡稱路透社。
+
+##### 涉及到的人物(PERSON)
+我們可以透過coreNLP中的NER解析出在Twitter上面談論東京奧運話題，所涉及到的人物(PERSON)，以初步了解這個議題的主要人物。
+
+
+```{r}
+tokens %>%
+  filter(ner == "PERSON") %>%  #篩選NER為PERSON
+  group_by(lower_word) %>% #根據word分組
+  summarize(count = n()) %>% #計算每組
+  top_n(n = 10, count) %>%
+  ungroup() %>% 
+  mutate(word = reorder(lower_word, count)) %>%
+  ggplot(aes(word, count)) + 
+  geom_col(fill="#c65911")+
+  ggtitle("Word Frequency (NER is PERSON)") +
+  theme(text=element_text(size=14))
+```
+
++ Suga: 日本首相菅義偉(Yoshihide Suga )
++ Nikai:執政黨的自民黨幹事長二階俊博（Toshihiro Nikai)
+
+
+
+
+### 探索分析 - Dependency
+
+##### 語句依存關係結果
+
+```{r eval=FALSE, message=FALSE, warning=FALSE}
+dependencies = coreNLP_dependency_parser(obj)
+```
+```{r}
+head(dependencies,20)
+```
+
+
+##### 視覺化 Dependency tree
+```{r message=FALSE, warning=FALSE}
+parse_tree <- obj[[113]]$doc[[1]][[1]]$parse
+tree <- parse2tree(parse_tree)
+SetNodeStyle(tree, style = "filled,rounded", shape = "box", fillcolor = "GreenYellow")
+plot(tree)
+```
+
+### 探索分析 - Sentiment
+
+##### 語句情緒值
+情緒分數從最低分0~最高分4<br>
+  + 0,1 : very negative,negative<br>
+  + 2 : neutral <br>
+  + 3,4 : very positive,postive<br> 
+  
+```{r eval=FALSE}
+sentiment = coreNLP_sentiment_parser(obj)
+```
+
+```{r}
+head(sentiment,20)
+```
+
+
+##### 資料集中的情緒種類
+```{r}
+unique(sentiment$sentiment)
+sentiment$sentimentValue = sentiment$sentimentValue %>% as.numeric
+```
+
+```{r}
+#了解情緒文章的分佈
+sentiment$sentiment %>% table()
+```
+
+##### 平均情緒分數時間趨勢
+```{r}
+df$date = as.Date(df$created_at)
+
+sentiment %>% 
+  merge(df[,c("status_id","source","date")]) %>%
+  group_by(date) %>% 
+  summarise(avg_sentiment = mean(sentimentValue,na.rm=T)) %>% 
+  ggplot(aes(x=date,y=avg_sentiment)) + 
+  geom_line()
+
+```
+
++ 隨著日本疫情的未改善，民眾情緒逐漸負面。
++ 4/15執政黨坦承東京奧運可能取消，出現情緒朝負面下滑情形。
+
+##### 不同用戶端情緒時間趨勢
+
+```{r}
+sentiment %>% 
+  merge(df[,c("status_id","source","date")]) %>%
+  filter(source %in% c("Twitter Web Client","Twitter for iPhone","Twitter for Android")) %>% 
+  group_by(date,source) %>% 
+  summarise(avg_sentiment = mean(sentimentValue,na.rm=T)) %>% 
+  ggplot(aes(x=date,y=avg_sentiment,color=source)) + 
+  geom_line()
+
+```
+
++ 依據不同上網裝置，一樣可以看出隨著日本疫情的未改善，民眾情緒逐漸負面。
+
+
+##### 了解情緒分佈，以及在正面情緒及負面情緒下，所使用的文章詞彙為何?
+```{r }
+#了解正面文章的詞彙使用
+sentiment %>% 
+  merge(tokens) %>% 
+  anti_join(stop_words) %>% 
+  filter(!lower_word %in% c('i','the')) %>% 
+  filter(sentiment == "Verypositive" | sentiment =='Positive') %>%
+  group_by(lower_lemma) %>% #根據lemma分組
+  summarize(count = n()) %>% 
+  filter(count >5 & count<400)%>%
+  wordcloud2()
+```
++ 文字雲中看出正面情緒不高，判斷是已受疫情一年的影響。
+
+```{r eval=FALSE, message=FALSE, warning=FALSE}
+#了解負面文章的詞彙使用
+sentiment %>% 
+  merge(tokens) %>% 
+  anti_join(stop_words) %>% 
+  filter(!lower_word %in% c('i','the')) %>% 
+  filter(sentiment == "Verynegative" | sentiment =='Negative') %>%
+  group_by(lower_lemma) %>% 
+  summarize(count = n()) %>% 
+  filter(count >10 &count<400)%>%
+  wordcloud2()
+```
+![](wordcloud.PNG)
+
+
++ 距離東京奧運開幕不到100 天，日本政府極力控制武漢疫情，確診數仍不斷升高。
++ 民調顯示，多數日本人民不贊成在疫情期間舉行奧運，甚至有人在日本推特發起的「取消奧運」（Canceling Olympics）活動。
+
+### 探索分析 - 情緒波動
+
+##### 用日期來了解情緒波動
++ code 參考 https://github.com/trinker/sentimentr 
+
+```{r eval=FALSE, message=FALSE, warning=FALSE}
+tweets$date = format(tweets$created_at,'%Y%m%d')
+
+(out  = tweets  %>%  with(
+    sentiment_by( #document level
+        get_sentences(text), 
+        list( date)
+    )
+))
+plot(out)
+```
+![](day.PNG)
+
+##### 用日期來了解不同用戶端情的緒波動
+```{r eval=FALSE, message=FALSE, warning=FALSE}
+(out  = tweets %>% filter(source %in% c("Twitter Web Client","Twitter for iPhone","Twitter for Android")) %>%  with(
+    sentiment_by(
+        get_sentences(text), 
+        list(source, date)
+    )
+))
+plot(out)
+```
+
+![](user.PNG)
+
+##### 轉換Emoji代碼為語意文字
+```{r}
+replace_emoji("\U0001f4aa")
+```
+
+## E.結論
+> coreNLP</br>
+
+1. 找出議題核心人物，組織，國家
+2. 用句法學的分析找出句子相依關係
+3. 分別找出正、負面文章的常用字
+
+> sentimentr</br>
+
+1. 找到tweets中正負面的詞，並且計算每個文本中屬於正負面的句子有哪些
+2. 根據日期知道情緒的波動、不同用戶端的波動
+
+> 心得</br>
+
+1. 利用老師及助教上課的教材，透過Tiwtter API的設定，抓取資料分析。
+2. 取得日本奧運相關的文章，並透過coreNLP及sentimentr的分析，了解時事動態。
+3. 感謝助教在專案練習過程中給予指導，讓本組專案可以順利完成。
